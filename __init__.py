@@ -20,7 +20,8 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 """
-#pylint: disable=missing-docstring,broad-except
+# pylint: disable=unused-argument,attribute-defined-outside-init
+
 import html
 import logging
 import random
@@ -32,7 +33,7 @@ from difflib import SequenceMatcher
 from enum import Enum
 from time import time
 
-from volaparrot.commands import PulseCommand
+from volaparrot.commands import Command, PulseCommand
 from volaparrot.utils import requests
 
 
@@ -169,45 +170,59 @@ class Game:
         return "Leaders: {}".format(" ".join(scores))
 
 
-class TriviaCommand(PulseCommand):
+class TriviaCommand(Command, PulseCommand):
     interval = 5.0
     timeout = 30
 
     def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.abortgame()
+
+    def abortgame(self):
         self.game = None
         self.deadline = 0
-        super().__init__(*args, **kw)
+        self.timeouts = 0
 
     def handles(self, cmd):
         if cmd == "!trivia":
             return True
         return self.game is not None
 
-    def __call__(self, cmd, remainder, msg):
+    def handle_trivded(self, cmd, remainder, msg):
+        if self.isadmin(msg):
+            self.abortgame()
+        return True
+
+    def handle_trivia(self, cmd, remainder, msg):
+        if not self.allowed(msg):
+            return True
+
+        if self.game:
+            self.post("{}", self.game)
+            return True
+
+        try:
+            towin = min(25, max(1, int(remainder.strip())))
+        except Exception:
+            towin = 5
+        self.deadline = 0
+        self.game = Game(towin)
+        self.post("Started a trivia with {} to win", towin)
+        return True
+
+    def handle_cmd(self, cmd, remainder, msg):
         if not self.allowed(msg):
             return False
 
-        if cmd == "!trivia":
-            if self.game:
-                self.post("{}", self.game)
-                return True
-            try:
-                towin = max(1, int(remainder.strip()))
-            except Exception:
-                towin = 5
-            self.deadline = 0
-            self.game = Game(towin)
-            self.post("Started a trivia with {} to win", towin)
-            return True
-
         res = self.game.check(msg.nick, msg.msg)
         if res == Result.WON:
-            self.game = None
+            self.abortgame()
             self.post("WE GOT A WINRAR! Congrats {}", msg.nick)
             return True
 
         if res == Result.CORRECT:
             self.deadline = 0
+            self.timeouts = 0
             self.post("Indeed, {}: {}", msg.nick, self.game.question.answer)
             self.game.skip()
             return True
@@ -221,10 +236,15 @@ class TriviaCommand(PulseCommand):
             self.deadline = time() + self.timeout
             self.post("{}", self.game.question)
             return
+
         if not self.deadline > time():
             self.post("Too slow! Answer: {}", self.game.question.answer)
             self.game.skip()
             self.deadline = 0
+            self.timeouts += 1
+            if self.timeouts > self.game.towin * 1.5:
+                self.abortgame()
+                self.post("Trivia: Aborted game")
             return
 
 if __name__ == "__main__":
